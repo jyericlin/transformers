@@ -74,6 +74,7 @@ from .stopping_criteria import (
     validate_stopping_criteria,
 )
 
+import kong
 
 if TYPE_CHECKING:
     from ..modeling_utils import PreTrainedModel
@@ -569,6 +570,7 @@ class GenerationMode(ExplicitEnum):
     GROUP_BEAM_SEARCH = "group_beam_search"
 
 
+# @kong.distributeclass
 class GenerationMixin:
     """
     A class containing all functions for auto-regressive text generation, to be used as a mixin in [`PreTrainedModel`].
@@ -1392,6 +1394,7 @@ class GenerationMixin:
                     UserWarning,
                 )
 
+    # @kong.distribute
     @torch.no_grad()
     def generate(
         self,

@@ -41,6 +41,7 @@ from ...utils import (
 )
 from .configuration_opt import OPTConfig
 
+import kong
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -94,7 +95,7 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
         # OPT is set up so that if padding_idx is specified then offset the embedding ids by 2
         # and adjust num_embeddings appropriately. Other models don't have this hack
         self.offset = 2
-        super().__init__(num_embeddings + self.offset, embedding_dim)
+        super(OPTLearnedPositionalEmbedding, self).__init__(num_embeddings + self.offset, embedding_dim)
 
     def forward(self, attention_mask: torch.LongTensor, past_key_values_length: int = 0):
         """`input_ids_shape` is expected to be [bsz x seqlen]."""
@@ -106,7 +107,7 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
         # cut positions if `past_key_values_length` is > 0
         positions = positions[:, past_key_values_length:]
 
-        return super().forward(positions + self.offset)
+        return super(OPTLearnedPositionalEmbedding, self).forward(positions + self.offset)
 
 
 class OPTAttention(nn.Module):
@@ -118,7 +119,7 @@ class OPTAttention(nn.Module):
         is_decoder: bool = False,
         **kwargs,
     ):
-        super().__init__()
+        super(OPTAttention, self).__init__()
         self.config = config
 
         def _handle_deprecated_argument(config_arg_name, config, fn_arg_name, kwargs):
@@ -291,7 +292,7 @@ class OptFlashAttention2(OPTAttention):
 
     # Copied from transformers.models.llama.modeling_llama.LlamaFlashAttention2.__init__
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super(OptFlashAttention2, self).__init__(*args, **kwargs)
 
         # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
@@ -499,7 +500,7 @@ OPT_ATTENTION_CLASSES = {
 
 class OPTDecoderLayer(nn.Module):
     def __init__(self, config: OPTConfig):
-        super().__init__()
+        super(OPTDecoderLayer, self).__init__()
         self.embed_dim = config.hidden_size
 
         self.self_attn = OPT_ATTENTION_CLASSES[config._attn_implementation](config=config, is_decoder=True)
@@ -694,7 +695,7 @@ OPT_INPUTS_DOCSTRING = r"""
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 """
 
-
+@kong.distributeclass
 class OPTDecoder(OPTPreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`OPTDecoderLayer`]
@@ -704,7 +705,7 @@ class OPTDecoder(OPTPreTrainedModel):
     """
 
     def __init__(self, config: OPTConfig):
-        super().__init__(config)
+        super(OPTDecoder, self).__init__(config)
         self.dropout = config.dropout
         self.layerdrop = config.layerdrop
         self.padding_idx = config.pad_token_id
@@ -747,6 +748,7 @@ class OPTDecoder(OPTPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    @kong.distribute
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -950,7 +952,7 @@ class OPTDecoder(OPTPreTrainedModel):
 )
 class OPTModel(OPTPreTrainedModel):
     def __init__(self, config: OPTConfig):
-        super().__init__(config)
+        super(OPTModel, self).__init__(config)
         self.decoder = OPTDecoder(config)
         # Initialize weights and apply final processing
         self.post_init()
@@ -1013,12 +1015,12 @@ class OPTModel(OPTPreTrainedModel):
             attentions=decoder_outputs.attentions,
         )
 
-
+# @kong.distributeclass
 class OPTForCausalLM(OPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
-        super().__init__(config)
+        super(OPTForCausalLM, self).__init__(config)
         self.model = OPTModel(config)
 
         # the lm_head weight is automatically tied to the embed tokens weight
@@ -1045,7 +1047,8 @@ class OPTForCausalLM(OPTPreTrainedModel):
     def get_decoder(self):
         return self.model.decoder
 
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    # @kong.distribute
+    # @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1234,7 +1237,7 @@ class OPTForCausalLM(OPTPreTrainedModel):
 )
 class OPTForSequenceClassification(OPTPreTrainedModel):
     def __init__(self, config: OPTConfig):
-        super().__init__(config)
+        super(OPTForSequenceClassification, self).__init__(config)
         self.num_labels = config.num_labels
         self.model = OPTModel(config)
         self.score = nn.Linear(config.word_embed_proj_dim, self.num_labels, bias=False)
@@ -1356,7 +1359,7 @@ class OPTForSequenceClassification(OPTPreTrainedModel):
 )
 class OPTForQuestionAnswering(OPTPreTrainedModel):
     def __init__(self, config: OPTConfig):
-        super().__init__(config)
+        super(OPTForQuestionAnswering, self).__init__(config)
         self.model = OPTModel(config)
         self.qa_outputs = nn.Linear(config.word_embed_proj_dim, 2)
 
