@@ -84,6 +84,7 @@ logger = logging.get_logger(__name__)
 if is_accelerate_available():
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
+import time
 
 @dataclass
 class GreedySearchDecoderOnlyOutput(ModelOutput):
@@ -2667,7 +2668,7 @@ class GenerationMixin:
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            return input_ids
+            return input_ids, model_kwargs
 
     def sample(
         self,
