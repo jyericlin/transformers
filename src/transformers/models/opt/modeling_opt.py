@@ -748,7 +748,9 @@ class OPTDecoder(OPTPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @kong.distribute
+    # @kong.distribute_with_config(partition_names=["decoder_layer"], if_partitioned=False)
+    @kong.distribute_with_config(partition_names=["decoder_layer"])
+    @kong.readonly
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1143,7 +1145,10 @@ class OPTForCausalLM(OPTPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model.decoder(
+        import time
+        t1 = time.time()
+        outputs = kong.get(self.model.decoder.forward(
+        # outputs = self.model.decoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             head_mask=head_mask,
@@ -1153,7 +1158,10 @@ class OPTForCausalLM(OPTPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-        )
+        # )
+        ))
+        t2 = time.time()
+        print(f"Time taken for decoder: {t2-t1}")
 
         logits = self.lm_head(outputs[0]).contiguous()
 
