@@ -704,6 +704,7 @@ class OPTDecoder(OPTPreTrainedModel):
         config: OPTConfig
     """
 
+    @kong.partial_model_init([48])
     def __init__(self, config: OPTConfig):
         super(OPTDecoder, self).__init__(config)
         self.dropout = config.dropout
@@ -735,7 +736,8 @@ class OPTDecoder(OPTPreTrainedModel):
         else:
             self.final_layer_norm = None
 
-        self.layers = nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        # self.layers = nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = kong.selective_params_list(nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)]))
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         self.gradient_checkpointing = False
