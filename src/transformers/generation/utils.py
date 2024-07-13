@@ -2411,6 +2411,7 @@ class GenerationMixin:
         else:
             return input_ids
 
+    @kong.distribute
     def greedy_search(
         self,
         input_ids: torch.LongTensor,
@@ -2579,7 +2580,7 @@ class GenerationMixin:
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # forward pass to get next token
-            outputs = self(
+            outputs = self.forward(
                 **model_inputs,
                 return_dict=True,
                 output_attentions=output_attentions,
@@ -2614,6 +2615,13 @@ class GenerationMixin:
 
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
+            # next_tokens = outputs.logits
+
+
+            # print("next_tokens", next_tokens)
+            # if input_ids.shape[1] == 9:
+            #     exit()
+            
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:

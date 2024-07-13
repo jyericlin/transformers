@@ -18,7 +18,10 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch import nn
+# from torch import nn
+from kong.torch import nn
+from kong.torch.kong_wrapper import KongTensor, KongPartitionType
+
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN
@@ -47,6 +50,9 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
+import time
+from kong import torch
+import sys
 
 logger = logging.get_logger(__name__)
 
@@ -109,7 +115,7 @@ class OPTLearnedPositionalEmbedding(nn.Embedding):
 
         return super(OPTLearnedPositionalEmbedding, self).forward(positions + self.offset)
 
-
+@kong.distributeclass
 class OPTAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -162,6 +168,15 @@ class OPTAttention(nn.Module):
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
+    def update_for_weight_partitioning(self, idx=0, n_partition=4):
+        partition_portion = 1.0 / n_partition
+        partition_list = [partition_portion] * n_partition
+        self.k_proj.partition([1.0, partition_list], [0, idx])
+        self.v_proj.partition([1.0, partition_list], [0, idx])
+        self.q_proj.partition([1.0, partition_list], [0, idx])
+        self.out_proj.partition([partition_list, 1.0], [idx, 0])
+
+    @kong.distribute(sequential_partition_mode="disable", overload_mode="no_py_native")
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -261,9 +276,9 @@ class OPTAttention(nn.Module):
         else:
             attn_weights_reshaped = None
 
-        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        # attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        attn_output = torch.bmm(attn_probs, value_states)
+        attn_output = torch.bmm(attn_weights, value_states)
 
         if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
@@ -497,7 +512,7 @@ OPT_ATTENTION_CLASSES = {
     "flash_attention_2": OptFlashAttention2,
 }
 
-
+@kong.distributeclass
 class OPTDecoderLayer(nn.Module):
     def __init__(self, config: OPTConfig):
         super(OPTDecoderLayer, self).__init__()
@@ -516,6 +531,7 @@ class OPTDecoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
+    @kong.distribute(sequential_partition_mode="kong_method_only")
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -548,6 +564,7 @@ class OPTDecoderLayer(nn.Module):
             hidden_states = self.self_attn_layer_norm(hidden_states)
 
         # Self Attention
+
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             past_key_value=past_key_value,
@@ -555,6 +572,95 @@ class OPTDecoderLayer(nn.Module):
             layer_head_mask=layer_head_mask,
             output_attentions=output_attentions,
         )
+
+        ##### parallel partitioning profiling ######
+        # n_partition = sys.modules['kong_globals'].temp_n_partition
+
+        # if n_partition == 1:
+        #     t1 = time.time()
+        #     hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        #             hidden_states=hidden_states,
+        #             past_key_value=past_key_value,
+        #             attention_mask=attention_mask,
+        #             layer_head_mask=layer_head_mask,
+        #             output_attentions=output_attentions,
+        #         )
+        #     t2 = time.time()
+        #     profile_name = "self_attn_" + "_".join([str(s) for s in list(hidden_states.size())]) + "_" + str(n_partition)
+        #     sys.modules["kong_globals"].system_profiler.custom_record_time(profile_name, t2-t1)
+        # else:
+        #     hidden_states_list = []
+        #     self_attn_weights_list = []
+        #     present_key_value_list = []
+        #     hidden_states = KongTensor(hidden_states, partition_type=KongPartitionType.REPLICATED)
+        #     past_key_value_paritioned = []
+        #     if past_key_value is not None:
+        #         start_idx = 0
+        #         partition_size = past_key_value[0].size(1)//n_partition
+        #         partition_ratio = [1/n_partition] * n_partition
+        #         for i in range(n_partition):
+        #             past_key_value_paritioned.append([KongTensor(past_key_value[0][:, start_idx:start_idx+partition_size], 
+        #                                                         partition_type=KongPartitionType.PARTITIONED,
+        #                                                         tensor_size=past_key_value[0].size(),
+        #                                                         partition_dims=[1],
+        #                                                         partition_idxs=[i],
+        #                                                         partition_ratios=[partition_ratio]),
+        #                                             KongTensor(past_key_value[1][:, start_idx:start_idx+partition_size], 
+        #                                                     partition_type=KongPartitionType.PARTITIONED,
+        #                                                     tensor_size=past_key_value[1].size(),
+        #                                                     partition_dims=[1],
+        #                                                     partition_idxs=[i],
+        #                                                     partition_ratios=[partition_ratio])
+        #                                             ])
+        #             start_idx += partition_size
+
+        #     for i in range(n_partition):
+        #         self.self_attn.update_for_weight_partitioning(i, n_partition)
+        #         if past_key_value is not None:
+        #             past_key_value = past_key_value_paritioned[i]
+                
+        #         if i == 0: # only measure the first partition
+        #         # print("!" * 100, "Partition: ", i, "!" * 100)
+        #             for i in range(10): # warm up
+        #                 new_hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        #                     hidden_states=hidden_states,
+        #                     past_key_value=past_key_value,
+        #                     attention_mask=attention_mask,
+        #                     layer_head_mask=layer_head_mask,
+        #                     output_attentions=output_attentions,
+        #                 )
+        #             N_MEASURE = 10
+        #             t1 = time.time()
+        #             for i in range(N_MEASURE): # measure
+        #                 new_hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        #                     hidden_states=hidden_states,
+        #                     past_key_value=past_key_value,
+        #                     attention_mask=attention_mask,
+        #                     layer_head_mask=layer_head_mask,
+        #                     output_attentions=output_attentions,
+        #                 )
+        #             t2 = time.time()
+        #             # print("#"*100)
+        #             profile_name = "self_attn_" + "_".join([str(s) for s in list(hidden_states.size())]) + "_" + str(n_partition)
+        #             sys.modules["kong_globals"].system_profiler.custom_record_time(profile_name, (t2-t1)/N_MEASURE)
+        #         else:
+        #             new_hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        #                 hidden_states=hidden_states,
+        #                 past_key_value=past_key_value,
+        #                 attention_mask=attention_mask,
+        #                 layer_head_mask=layer_head_mask,
+        #                 output_attentions=output_attentions,
+        #             )
+        #         hidden_states_list.append(new_hidden_states)
+        #         self_attn_weights_list.append(self_attn_weights)
+        #         present_key_value_list.append(present_key_value)
+        #     hidden_states = torch.sum(torch.stack([kt.tensor for kt in hidden_states_list]), dim=0)
+        #     self_attn_weights = self_attn_weights_list[0]
+        #     present_key_value = []
+        #     present_key_value.append(torch.cat([kvc[0].tensor for kvc in present_key_value_list], dim=1))
+        #     present_key_value.append(torch.cat([kvc[1].tensor for kvc in present_key_value_list], dim=1))
+
+
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
 
@@ -704,7 +810,7 @@ class OPTDecoder(OPTPreTrainedModel):
         config: OPTConfig
     """
 
-    @kong.partial_model_init([48])
+    @kong.dynamic_weight_init(["self.layers"])
     def __init__(self, config: OPTConfig):
         super(OPTDecoder, self).__init__(config)
         self.dropout = config.dropout
@@ -736,8 +842,9 @@ class OPTDecoder(OPTPreTrainedModel):
         else:
             self.final_layer_norm = None
 
-        # self.layers = nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.layers = kong.selective_params_list(nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)]))
+        self.layers = nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        # self.layers = nn.ModuleList([None for _ in range(config.num_hidden_layers)])
+        # self.layers = kong.selective_params_list(nn.ModuleList([OPTDecoderLayer(config) for _ in range(config.num_hidden_layers)]))
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         self.gradient_checkpointing = False
@@ -750,8 +857,10 @@ class OPTDecoder(OPTPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    # @kong.distribute_with_config(partition_names=["decoder_layer"], if_partitioned=False)
-    @kong.distribute_with_config(partition_names=["decoder_layer"])
+    # @kong.distribute(partition_names=[], if_partitioned=False)
+    # @kong.distribute(partition_names=["decoder_layer"], if_partitioned=False)
+    # @kong.distribute(sequential_partition_mode="no_if")
+    @kong.distribute(partition_names=["decoder_layer"])
     @kong.readonly
     def forward(
         self,
@@ -897,7 +1006,7 @@ class OPTDecoder(OPTPreTrainedModel):
             if self.training:
                 dropout_probability = torch.rand([])
                 if dropout_probability < self.layerdrop:
-                    continue
+                    break
 
             past_key_value = past_key_values[idx] if past_key_values is not None else None
 
@@ -950,14 +1059,16 @@ class OPTDecoder(OPTPreTrainedModel):
         )
 
 
-@add_start_docstrings(
-    "The bare OPT Model outputting raw hidden-states without any specific head on top.",
-    OPT_START_DOCSTRING,
-)
+# @add_start_docstrings(
+#     "The bare OPT Model outputting raw hidden-states without any specific head on top.",
+#     OPT_START_DOCSTRING,
+# )
+@kong.distributeclass
 class OPTModel(OPTPreTrainedModel):
     def __init__(self, config: OPTConfig):
         super(OPTModel, self).__init__(config)
         self.decoder = OPTDecoder(config)
+        self.decoder.freeze()
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -970,13 +1081,14 @@ class OPTModel(OPTPreTrainedModel):
     def get_decoder(self):
         return self.decoder
 
-    @add_start_docstrings_to_model_forward(OPT_INPUTS_DOCSTRING)
-    @add_code_sample_docstrings(
-        checkpoint=_CHECKPOINT_FOR_DOC,
-        output_type=BaseModelOutputWithPast,
-        config_class=_CONFIG_FOR_DOC,
-        expected_output=_EXPECTED_OUTPUT_SHAPE,
-    )
+    # @add_start_docstrings_to_model_forward(OPT_INPUTS_DOCSTRING)
+    # @add_code_sample_docstrings(
+    #     checkpoint=_CHECKPOINT_FOR_DOC,
+    #     output_type=BaseModelOutputWithPast,
+    #     config_class=_CONFIG_FOR_DOC,
+    #     expected_output=_EXPECTED_OUTPUT_SHAPE,
+    # )
+    @kong.distribute
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1019,7 +1131,7 @@ class OPTModel(OPTPreTrainedModel):
             attentions=decoder_outputs.attentions,
         )
 
-# @kong.distributeclass
+@kong.distributeclass
 class OPTForCausalLM(OPTPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -1051,7 +1163,7 @@ class OPTForCausalLM(OPTPreTrainedModel):
     def get_decoder(self):
         return self.model.decoder
 
-    # @kong.distribute
+    @kong.distribute
     # @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -1147,9 +1259,9 @@ class OPTForCausalLM(OPTPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        import time
+        
         t1 = time.time()
-        outputs = kong.get(self.model.decoder.forward(
+        outputs = self.model.decoder.forward(
         # outputs = self.model.decoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1161,9 +1273,13 @@ class OPTForCausalLM(OPTPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         # )
-        ))
+        )
+        # print("model.decoder.forward outputs type: ", type(outputs))
+        # print(len(outputs))
+
         t2 = time.time()
         print(f"Time taken for decoder: {t2-t1}")
+        # exit()
 
         logits = self.lm_head(outputs[0]).contiguous()
 

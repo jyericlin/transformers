@@ -97,6 +97,7 @@ from .utils.import_utils import (
 from .utils.quantization_config import AwqConfig, BitsAndBytesConfig, GPTQConfig, QuantizationMethod
 from .utils.versions import require_version_core
 
+import kong
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
 XLA_DOWNCAST_BF16 = os.environ.get("XLA_DOWNCAST_BF16", "0").upper()
@@ -516,7 +517,8 @@ def load_state_dict(checkpoint_file: Union[str, os.PathLike]):
         else:
             map_location = "cpu"
 
-        return torch.load(checkpoint_file, map_location=map_location)
+        # return torch.load(checkpoint_file, map_location=map_location)
+        return kong.weight_load(checkpoint_file)
     except Exception as e:
         try:
             with open(checkpoint_file) as f:
@@ -4042,6 +4044,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 remove_prefix_from_model,
                 ignore_mismatched_sizes,
             )
+            kong.map_model_with_state_dict(model_to_load, state_dict, start_prefix)
             error_msgs = _load_state_dict_into_model(model_to_load, state_dict, start_prefix)
             offload_index = None
         else:
