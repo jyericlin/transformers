@@ -537,7 +537,7 @@ class OPTDecoderLayer(nn.Module):
         self.fc1.partition([1.0, partition_list], [0, idx])
         self.fc2.partition([partition_list, 1.0], [idx, 0])
 
-    @kong.distribute(sequential_partition_mode="kong_method_only")
+    @kong.distribute(sequential_partition_mode="kong_method_only", partition_names=["self.fc2", "self.final_layer_norm"])
     def forward(
         self,
         hidden_states: torch.Tensor,
