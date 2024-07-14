@@ -531,6 +531,12 @@ class OPTDecoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
 
+    def update_for_weight_partitioning(self, idx=0, n_partition=4):
+        partition_portion = 1.0 / n_partition
+        partition_list = [partition_portion] * n_partition
+        self.fc1.partition([1.0, partition_list], [0, idx])
+        self.fc2.partition([partition_list, 1.0], [idx, 0])
+
     @kong.distribute(sequential_partition_mode="kong_method_only")
     def forward(
         self,
@@ -677,10 +683,47 @@ class OPTDecoderLayer(nn.Module):
         if self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
 
+        # normal FC
         hidden_states = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-
         hidden_states = self.fc2(hidden_states)
+
+        # partitioned FC
+        # if n_partition == 1:
+        #     t1 = time.time()
+        #     hidden_states = self.fc1(hidden_states)
+        #     hidden_states = self.activation_fn(hidden_states)
+        #     hidden_states = self.fc2(hidden_states)
+        #     t2 = time.time()
+        #     profile_name = "fc_" + "_".join([str(s) for s in list(hidden_states.size())]) + "_" + str(n_partition)
+        #     sys.modules["kong_globals"].system_profiler.custom_record_time(profile_name, t2-t1)
+        # else:
+        #     hidden_states_list = []
+        #     hidden_states = KongTensor(hidden_states, partition_type=KongPartitionType.REPLICATED)
+        #     for i in range(n_partition):
+        #         self.update_for_weight_partitioning(i, n_partition)
+        #         if i == 0: # only measure the first partition
+        #         #     for i in range(10): # warm up
+        #         #         p_hidden_states = self.fc1(hidden_states)
+        #         #         p_hidden_states = self.activation_fn(p_hidden_states)
+        #         #         p_hidden_states = self.fc2(p_hidden_states)
+        #             N_MEASURE = 1
+        #             t1 = time.time()
+        #             for i in range(N_MEASURE): # measure
+        #                 p_hidden_states = self.fc1(hidden_states)
+        #                 p_hidden_states = self.activation_fn(p_hidden_states)
+        #                 p_hidden_states = self.fc2(p_hidden_states)
+        #             t2 = time.time()
+        #             profile_name = "fc_" + "_".join([str(s) for s in list(hidden_states.size())]) + "_" + str(n_partition)
+        #             sys.modules["kong_globals"].system_profiler.custom_record_time(profile_name, (t2-t1)/N_MEASURE)
+        #         else:
+        #             p_hidden_states = self.fc1(hidden_states)
+        #             p_hidden_states = self.activation_fn(p_hidden_states)
+        #             p_hidden_states = self.fc2(p_hidden_states)
+        #         hidden_states_list.append(p_hidden_states)
+        #     hidden_states = torch.sum(torch.stack([kt.tensor for kt in hidden_states_list]), dim=0)
+                
+
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
         hidden_states = (residual + hidden_states).view(hidden_states_shape)
